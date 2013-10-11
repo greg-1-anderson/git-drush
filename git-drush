@@ -1,0 +1,229 @@
+#!/bin/bash
+
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#
+# git-drush
+#
+# Install Drush via git, and set up the PATH and other bash
+# settings.
+#
+# USAGE:
+#
+#       git-drush [master|6.x|5.x] [options]
+#
+# OPTIONS:
+#
+#       --destination     Download to the specified directory.
+#                         Optional; default is ~/local/drush
+#
+#       --user            github username to clone fork of
+#                         drush-ops/drush from.  Optional; default
+#                         is to clone directly from drush-ops/drush
+#
+#
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+#
+# Process commandline options and arguments
+#
+# We support either --destination /path or --destination=/path
+#
+while [ $# -gt 0 ] ; do
+
+        option=$1
+        shift
+
+        # Remove the '=' and everything before it in the option
+        option_holds_value=${option#*=}
+
+        # If there was no '=' in the option, then
+        # "$option_holds_value" == "$option"
+        if [ "$option_holds_value" != "$option" ] ; then
+                # Remove the '=' and everything after it
+                option=${option%%=*}
+                value=$option_holds_value
+        else
+                option_holds_value=
+                value=$1
+        fi
+
+        case "$option" in
+                --destination )
+                        destination_dir=$value
+                        [ -n "$option_holds_value" ] || shift
+                        ;;
+
+                --user )
+                        github_user=$value
+                        [ -n "$option_holds_value" ] || shift
+                        ;;
+
+                -* )
+                        echo "Unknown flag $option"
+                        exit 1
+                        ;;
+
+                * )
+                        if [ -z "$branch" ] ; then
+                                branch=$option
+                        else
+                                echo "Unknown argument $option"
+                                exit 1
+                        fi
+                        ;;
+        esac
+
+done
+
+# Directory installer is located in
+installer_dir=$(cd $(dirname $0) && pwd)
+
+# Default install directory is sibling of installer directory
+default_destination_dir=$(dirname $installer_dir)/drush
+
+#
+# Supply defaults
+#
+[ -z "$branch" ] && branch=master
+[ -z "$destination_dir" ] && destination_dir=$default_destination_dir
+
+#
+# Check to see if Drush is already installed
+#
+DRUSH="$(which drush)"
+
+if [ -n "$DRUSH" ] ; then
+        # Resolve symlinks - this is the equivalent of "readlink -f", but
+        #also works with non-standard OS X readlink.
+        while [ -h "$DRUSH" ]; do
+            # 1) cd to directory of the symlink
+            # 2) cd to the directory of where the symlink points
+            # 3) Get the pwd
+            # 4) Append the basename
+            DIR="`dirname -- "$DRUSH"`"
+            SYM="`readlink $DRUSH`"
+            SYM_DIRNAME="`dirname -- "$SYM"`"
+            DRUSH="`cd "$DIR" && cd "$SYM_DIRNAME" && pwd`/`basename -- "$SYM"`"
+        done
+
+        #
+        # Check to see if the installed Drush came from github.  If it did not,
+        # then ignore it or move it out of the way (if it is at the
+        # destination directory we're going to install to).
+        #
+        (
+                cd "$(dirname $DRUSH)""
+                origingithub=$(git remote show -n origin 2>/dev/null | grep github)
+                if [ -z "$origingithub" ] ; then
+                        if [ "$(dirname $DRUSH)" == "$destination_dir" ] ; then
+                                mv -f "$(dirname $DRUSH)" "$(dirname $DRUSH)"-previous
+                        fi
+                        DRUSH=
+                fi
+        )
+fi
+
+
+if [ -z "$DRUSH" ] && [ ! -d  "$destination_dir" ] ; then
+
+  (
+    mkdir -p $(dirname "$destination_dir")
+    cd $(dirname "$destination_dir")
+    if [ -n "$github_user" ]
+    then
+      git clone git@github.com:$github_user/drush.git
+      if [ ! -d drush ]
+      then
+        echo "Could not clone from git@github.com:$github_user/drush.git; cloning from drush-ops instead."
+      else
+        (
+          cd drush
+          git remote add drush-ops git@github.com:drush-ops/drush.git
+        )
+      fi
+    fi
+
+    if [ ! -d drush ] ; then
+      git clone git://github.com/drush-ops/drush.git
+    fi
+
+    #
+    # Add the "pr" line to the every entry that already has a 'fetch' line
+    #
+    #[remote "drush-ops"]
+    #  url = git@github.com:drush-ops/drush.git
+    #  fetch = +refs/heads/*:refs/remotes/drush-ops/*
+    #  fetch = +refs/pull/*/head:refs/remotes/drush-ops/pr/*
+    #
+    grep -v 'refs/remotes/[^/]*/pr' .git/config > .git/config.bak
+    sed -e 's#\([ \t]*\)\(fetch = +refs/heads/\*:refs/remotes/\)\([^/]*\)\(/.*\)#\1\2\3\4\n\1fetch = +refs/pull/*/head:refs/remotes/\3/pr/*#' .git/config.bak > .git/config
+  )
+
+fi
+
+#
+# Set DRUSH variable if we cloned it this run.
+#
+if [ -z "$DRUSH" ] && [ -d  "$destination_dir" ]
+then
+        DRUSH="$destination_dir"/drush
+fi
+
+echo "# Check drush extensions..."
+
+extensions_dir=$HOME/local/drupal/drush_extensions
+mkdir -p $extensions_dir
+
+#   drupalcs \
+for drush_extension in \
+    drush_sup \
+    drush_iq \
+    drush_extras \
+    dbtng_migrator \
+    registry_rebuild \
+    sublime_completion \
+    grn-6.x \
+    module_builder \
+    drush_deploy \
+    cacheaudit \
+  ; do
+
+        extension_shortname=$(echo $drush_extension | sed -e 's|-[0-9]*\.x-*[0-9]*\.*[0-9x]*$||');
+  extension_destination=$extensions_dir/$extension_shortname
+  if [ ! -d "$extension_destination" ] ; then
+                (
+                        cd $extensions_dir
+      # read+write if "extension_shortname" is in $MAINTAINER, read-only otherwise
+      if [ -n "$DRUPALORG_USERNAME" ] && [ "${MAINTAINER}" != "${MAINTAINER/$extension_shortname/}" ]
+      then
+        # Figure out what which branch to select (e.g. --branch 7.x-2.x)
+        branch=$($DRUSH pm-releases $extension_shortname | grep '\-dev' | head -n 1 | sed -e 's|^ *||' -e 's|-dev.*||')
+        if [ -z "$branch" ]
+        then
+          echo "Could not determine default branch for $extension_shortname"
+        else
+          git clone --recursive --branch "$branch" ${DRUPALORG_USERNAME}@git.drupal.org:project/$extension_shortname.git
+          if [ ! -d $extension_shortname ]
+          then
+            echo "Could not clone a r/w copy of $extension_shortname; cloning a r/o copy instead."
+          fi
+        fi
+      fi
+                        if [ ! -d "$extension_destination" ] ; then
+        $DRUSH --yes pm-download $drush_extension --destination="$extension_destination"
+      fi
+                )
+        fi
+
+done
+
+# Also copy in some of the example drush extensions from the drush/examples folder
+
+for example_extensions in sync_enable.drush.inc sync_via_http.drush.inc ; do
+
+        if [ ! -f "$HOME/local/drupal/extensions_dir/$example_extensions" ] ; then
+
+                cp "$HOME/local/drupal/drush/examples/$example_extensions" $extensions_dir
+
+        fi
+done
